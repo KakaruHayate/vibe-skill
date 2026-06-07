@@ -124,6 +124,7 @@ echo "Agent   : ${AGENT:-default}"
 echo "Model   : ${VIBE_MODEL_OVERRIDE:-(config default)}"
 echo "Turns   : $MAX_TURNS"
 echo "Timeout : ${TIMEOUT_SECS}s"
+echo "WinGuard: ${VIBE_WIN_PREAMBLE:-on}"
 echo "Prompt  : ${PROMPT:0:120}..."
 echo "==================="
 
@@ -154,6 +155,32 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE"' EXIT
 # bash argument. CWD is already set by the `cd "$WORKDIR"` above, so --workdir is
 # omitted (avoids MSYS vs Windows path-conversion edge cases).
 PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+
+# Windows shell-fallback guard (auto-injected preamble).
+# Observed failure (2026-06-07, deepseek-flash on J:/): vibe's built-in file-write
+# tool occasionally returns "Tool execution not permitted" on Windows. The model
+# then falls back to shell commands — but vibe's shell on Windows is cmd.exe, so
+# `mkdir -p`, PowerShell heredocs, and `echo <html>` (redirection) all fail. The
+# model keeps switching strategies and burns every remaining turn for zero output.
+# Prepending an explicit "no shell for file I/O" rule cuts this loop short: the
+# model either succeeds with write_file/search_replace or aborts cleanly.
+# Disable with VIBE_WIN_PREAMBLE=off if you intentionally want raw model behavior.
+if [ "${VIBE_WIN_PREAMBLE:-on}" != "off" ]; then
+  WIN_PREAMBLE='WINDOWS HOST RULES (auto-injected by vibe-delegate.win):
+- Use ONLY the write_file and search_replace tools to create or modify files.
+- Do NOT use shell commands (bash, command, run_command, powershell, cmd) to write,
+  create, or copy files. The host shell is cmd.exe; "mkdir -p", "echo <html>",
+  and PowerShell heredocs will all fail.
+- If write_file or search_replace itself fails twice on the same file, STOP and
+  report the error — do not fall back to shell. Looping wastes the turn budget.
+- Paths use forward slashes (e.g. J:/foo/bar.html); they are already absolute.
+
+---
+
+'
+  PROMPT_CONTENT="${WIN_PREAMBLE}${PROMPT_CONTENT}"
+fi
+
 VIBE_ARGS=(-p "$PROMPT_CONTENT" --trust --max-turns "$MAX_TURNS" --output streaming)
 [ -n "$AGENT" ] && VIBE_ARGS=(--agent "$AGENT" "${VIBE_ARGS[@]}")
 

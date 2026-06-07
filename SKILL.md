@@ -98,6 +98,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
+- **Windows shell-fallback loop** → on Git Bash, vibe's own shell tool runs under `cmd.exe`. If the model's `write_file` call fails (e.g. `Tool execution not permitted`), it falls back to `mkdir -p`, PowerShell heredocs, or `echo <html>` redirects — all of which fail on `cmd.exe`. The model keeps switching strategies and burns every remaining turn for zero output. `vibe-delegate.win` auto-injects a "no shell for file I/O" preamble to short-circuit this; disable with `VIBE_WIN_PREAMBLE=off`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
 ---
@@ -262,6 +263,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
+| Windows: 10+ tool calls, only `[WARN]` lines and shell attempts, 0 files changed, timeout | `write_file` denied once → model fell back to `cmd.exe` shell commands and looped | Use `vibe-delegate.win` (auto-injects shell-guard preamble). If it still happens, try `mistral-medium-3.5` — it handles tool failures more cleanly than `deepseek-flash` |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
@@ -300,7 +302,7 @@ Ready to commit?
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
-- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
+- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only). **On Windows**, prefer `mistral-medium-3.5` for any task that creates new files — `deepseek-flash` is more prone to the shell-fallback loop when `write_file` returns a transient error.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
