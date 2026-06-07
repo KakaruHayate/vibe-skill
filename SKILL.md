@@ -98,6 +98,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
+- **Open-ended prompts on large files** → on files >300 LOC, prompts that describe a bug ("fix this method, here's the buggy code…") cause the model to spend its output budget writing prose **before any tool call**. Symptom: `Tool calls: 0`, output tokens 3000+, timeout, empty diff. Both `deepseek-flash` and `mistral-medium-3.5` fail this way on the same file. **Fix**: rephrase as a closed-form OLD/NEW prompt (Step 3) when the change is precisely known. Real test on a 600-line C# file — open-ended: 0 tool calls / 188s timeout. Closed-form (same model): 2 tool calls / 35s / exit 0.
 - **Windows tool-approval gate** (root cause) → vibe 2.14's `default` agent requires interactive approval for every tool call. In `-p` programmatic mode there's no way to answer the prompt, so on Windows every `file:` call returns `Tool execution not permitted`. The model then loops on `cmd.exe` shell fallbacks (`mkdir -p`, PowerShell heredocs, `echo <html>` redirects) and burns the turn budget. `vibe-delegate.win` defaults the agent to `auto-approve` (override with 4th arg or `VIBE_NO_AUTO_APPROVE=1`). A "no shell for file I/O" preamble is also auto-injected as belt-and-suspenders for models that still wander off — disable with `VIBE_WIN_PREAMBLE=off`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
@@ -166,6 +167,55 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
   No other prose.
   ```
 
+### Closed-form replacement prompt (use when the change is precisely known)
+
+When you already know the exact OLD/NEW text — typical for review-comment fixes, planned refactors, or any case where you can grep the literal bytes — **don't describe the bug; give the model the literal blocks and tell it not to explain.** This is the highest-success-rate prompt shape, especially on large files where open-ended prompts time out at 0 tool calls (see Known Limits).
+
+Template (paste literally; the script forwards it via temp file so indentation is safe):
+```
+File: <path/relative/to/workdir>
+
+Perform exactly N search_replace operations. Do NOT read the file first. Do NOT explain. Just run the tool calls then stop.
+
+==========
+REPLACEMENT 1:
+
+OLD:
+<literal block — exact indentation, line endings as in the file>
+
+NEW:
+<literal block — exact indentation>
+
+==========
+REPLACEMENT 2:
+OLD:
+...
+NEW:
+...
+
+After all search_replace succeed, stop. No verification, no comment.
+```
+
+**Use this form when:**
+- You already know the exact OLD and NEW text
+- File is large (>300 LOC) — open-ended prompts have high timeout risk
+- Multiple precise edits in one call (each as its own `REPLACEMENT N` block)
+
+**Do NOT use it when:**
+- The model needs to discover the location or design the change → use the open-ended Structure above
+- Later replacements depend on earlier model-generated content
+
+**Why it works**: with literal OLD/NEW, the model has no reasoning gap to fill with prose. It functions as a stenographer for `search_replace`. Real comparison on a 600-line C# file, same workdir:
+
+| Prompt shape | Model | Tool calls | Duration | Result |
+|---|---|---|---|---|
+| Open-ended ("fix this bug…") | deepseek-flash | **0** | 188s timeout | empty diff |
+| Open-ended (simplified) | deepseek-flash | **0** | 128s timeout | empty diff |
+| Closed-form OLD/NEW | mistral-medium-3.5 | 2 | 47s | ✅ 41+/17- |
+| Closed-form OLD/NEW | deepseek-flash | 2 | 35s | ✅ 41+/17- (identical) |
+
+For closed-form prompts on existing files, **`deepseek-flash` is ~13× cheaper than mistral with no quality loss**. Save mistral for cases that genuinely need design reasoning or new-file creation.
+
 > ⚠️ **Shell safety**: if the prompt contains UTF-8 accented chars, emojis,
 > `:` in Python/YAML code, or typographic apostrophes — the vibe-delegate script
 > passes them safely via a temp file (`printf %q`). Never interpolate such a prompt
@@ -190,7 +240,7 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `prompt`       | —        | Self-contained task description                 |
 | `max-turns`    | `10`     | Mistral turn limit — hard cap at 12, never more |
 | `agent`        | *(none)* | See agent table below                           |
-| `timeout-secs` | `180`    | Wall-clock kill timer                           |
+| `timeout-secs` | `180`    | Wall-clock kill timer. Bump to `600` for open-ended prompts on files >300 LOC; closed-form OLD/NEW prompts (Step 3) typically finish in 30-60s and don't need it |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
 
 **Available agents:**
@@ -251,6 +301,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
+| `Tool calls: 0` + 1000+ output tokens + timeout | Model wrote prose instead of calling tools — open-ended prompt on a large file | Switch to **closed-form OLD/NEW prompt** (Step 3). Do not relaunch the same prompt |
 | No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not compensate — fix prompt and relaunch |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
@@ -302,7 +353,8 @@ Ready to commit?
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
-- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only). **On Windows**, prefer `mistral-medium-3.5` for any task that creates new files — `deepseek-flash` is more prone to the shell-fallback loop when `write_file` returns a transient error.
+- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only). For **closed-form OLD/NEW prompts on existing files**, `deepseek-flash` is ~13× cheaper than mistral with identical output — use it by default. **On Windows**, prefer `mistral-medium-3.5` for any task that creates new files — `deepseek-flash` is more prone to the shell-fallback loop when `write_file` returns a transient error.
+- **Closed-form > open-ended when the change is known** — if you can write the literal OLD/NEW blocks, use the closed-form template (Step 3) regardless of file size. Open-ended "fix this bug" prompts on files >300 LOC commonly hit 0 tool calls + timeout. Reach for closed-form first; fall back to open-ended only when the model must discover the location or design the change.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
