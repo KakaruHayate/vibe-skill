@@ -160,61 +160,6 @@ cd ~/vibe-skill && git pull
 
 `~/tools/vibe-delegate` and `~/.claude/skills/vibe/SKILL.md` are automatically up to date — no re-copy needed.
 
-> On Windows / Git Bash, `ln -sf` silently degrades to a file copy (no real symlink without Developer Mode). After a `git pull`, re-run the installation block to sync the copies. See the Windows section below.
-
-### Windows (Git Bash)
-
-Native Windows support via Git Bash — no WSL required. Uses `tools/vibe-delegate.win`, a sibling of the Unix script.
-
-**Prerequisites (Windows):**
-
-- Git Bash (comes with Git for Windows)
-- `vibe` ≥ 2.14, installed via [uv](https://docs.astral.sh/uv/) — the path Mistral recommends:
-  ```powershell
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  uv tool install mistral-vibe
-  ```
-- `python3`, `git`, `cygpath`, `timeout` (all present in a default Git Bash install)
-
-**Install:**
-
-```bash
-# In Git Bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && \
-mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff \
-         ~/.claude/skills/vibestatus ~/.claude/skills/vibe-model-pick \
-         ~/.claude/skills/vibe-model-clear ~/.claude/skills/vibe-report && \
-ln -sf "$(pwd)/tools/vibe-delegate.win" ~/tools/vibe-delegate && \
-ln -sf "$(pwd)/tools/delegate-report"   ~/tools/delegate-report && \
-chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && \
-ln -sf "$(pwd)/SKILL.md"              ~/.claude/skills/vibe/SKILL.md && \
-ln -sf "$(pwd)/VIBEON.md"             ~/.claude/skills/vibeon/SKILL.md && \
-ln -sf "$(pwd)/VIBEOFF.md"            ~/.claude/skills/vibeoff/SKILL.md && \
-ln -sf "$(pwd)/VIBESTATUS.md"         ~/.claude/skills/vibestatus/SKILL.md && \
-ln -sf "$(pwd)/VIBE-MODEL-PICK.md"    ~/.claude/skills/vibe-model-pick/SKILL.md && \
-ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md"   ~/.claude/skills/vibe-model-clear/SKILL.md && \
-ln -sf "$(pwd)/VIBE-REPORT.md"        ~/.claude/skills/vibe-report/SKILL.md
-```
-
-Note that `~/tools/vibe-delegate` points to **`vibe-delegate.win`**, not the Unix script. SKILL.md and all the other markdown skills are unchanged — they invoke `~/tools/vibe-delegate` exactly as on Unix.
-
-Verify:
-
-```bash
-~/tools/vibe-delegate /tmp "Reply with the single word OK." 3
-```
-
-You should see `=== VIBE DONE (exit: 0) ===` and a token/cost line.
-
-**Why a separate script:** the Unix `vibe-delegate` is incompatible with Windows in four specific places. The `.win` variant patches each one:
-
-| Problem | Fix in `vibe-delegate.win` |
-|---|---|
-| Python `pty.spawn` is Unix-only | Drop the PTY wrapper — `vibe` ≥ 2.14 runs cleanly under Git Bash without one |
-| Default Windows codec (`cp936`/GBK) crashes on emoji in vibe output and on UTF-8 bytes in `meta.json` | `export PYTHONUTF8=1` |
-| `timeout` puts `vibe.exe` in a new process group, breaking its console handle → `OSError 22` at the first `flush()` | `timeout --foreground` |
-| Windows Python rejects MSYS-style paths (`/c/Users/...`) and chokes on backslashes inside Python string literals | Convert the session-log path with `cygpath -m` (forward slashes) before interpolating |
-
 > **Migrating from a previous `cp`-based install?** Replace the copies with symlinks:
 > ```bash
 > cd ~/vibe-skill

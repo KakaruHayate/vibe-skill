@@ -98,7 +98,6 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **Windows tool-approval gate** (root cause) → vibe 2.14's `default` agent requires interactive approval for every tool call. In `-p` programmatic mode there's no way to answer the prompt, so on Windows every `file:` call returns `Tool execution not permitted`. The model then loops on `cmd.exe` shell fallbacks (`mkdir -p`, PowerShell heredocs, `echo <html>` redirects) and burns the turn budget. `vibe-delegate.win` defaults the agent to `auto-approve` (override with 4th arg or `VIBE_NO_AUTO_APPROVE=1`). A "no shell for file I/O" preamble is also auto-injected as belt-and-suspenders for models that still wander off — disable with `VIBE_WIN_PREAMBLE=off`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
 ---
@@ -263,7 +262,6 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
-| Windows: 10+ tool calls, all `file: Tool execution not permitted`, shell fallback attempts, 0 files changed, timeout | vibe 2.14's `default` agent gates tool approval; `-p` mode can't answer the prompt | `vibe-delegate.win` now defaults to `--agent auto-approve` on Windows. If you set the agent explicitly, pass `auto-approve` unless you specifically need `default`/`accept-edits`/`plan`. |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
@@ -302,7 +300,7 @@ Ready to commit?
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
-- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only). **On Windows**, prefer `mistral-medium-3.5` for any task that creates new files — `deepseek-flash` is more prone to the shell-fallback loop when `write_file` returns a transient error.
+- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
