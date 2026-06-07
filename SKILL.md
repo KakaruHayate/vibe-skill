@@ -98,7 +98,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **Windows shell-fallback loop** → on Git Bash, vibe's own shell tool runs under `cmd.exe`. If the model's `write_file` call fails (e.g. `Tool execution not permitted`), it falls back to `mkdir -p`, PowerShell heredocs, or `echo <html>` redirects — all of which fail on `cmd.exe`. The model keeps switching strategies and burns every remaining turn for zero output. `vibe-delegate.win` auto-injects a "no shell for file I/O" preamble to short-circuit this; disable with `VIBE_WIN_PREAMBLE=off`.
+- **Windows tool-approval gate** (root cause) → vibe 2.14's `default` agent requires interactive approval for every tool call. In `-p` programmatic mode there's no way to answer the prompt, so on Windows every `file:` call returns `Tool execution not permitted`. The model then loops on `cmd.exe` shell fallbacks (`mkdir -p`, PowerShell heredocs, `echo <html>` redirects) and burns the turn budget. `vibe-delegate.win` defaults the agent to `auto-approve` (override with 4th arg or `VIBE_NO_AUTO_APPROVE=1`). A "no shell for file I/O" preamble is also auto-injected as belt-and-suspenders for models that still wander off — disable with `VIBE_WIN_PREAMBLE=off`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
 ---
@@ -263,7 +263,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
-| Windows: 10+ tool calls, only `[WARN]` lines and shell attempts, 0 files changed, timeout | `write_file` denied once → model fell back to `cmd.exe` shell commands and looped | Use `vibe-delegate.win` (auto-injects shell-guard preamble). If it still happens, try `mistral-medium-3.5` — it handles tool failures more cleanly than `deepseek-flash` |
+| Windows: 10+ tool calls, all `file: Tool execution not permitted`, shell fallback attempts, 0 files changed, timeout | vibe 2.14's `default` agent gates tool approval; `-p` mode can't answer the prompt | `vibe-delegate.win` now defaults to `--agent auto-approve` on Windows. If you set the agent explicitly, pass `auto-approve` unless you specifically need `default`/`accept-edits`/`plan`. |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 

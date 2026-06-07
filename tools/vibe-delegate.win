@@ -64,6 +64,18 @@ MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
 TIMEOUT_SECS="${5:-180}"
 
+# Windows default agent: vibe 2.14's `default` agent gates every tool call on
+# an interactive approval prompt that can't be answered in `-p` programmatic
+# mode. The result on Windows is "file: Tool execution not permitted." on EVERY
+# call, the model retries with shell commands (which fail under cmd.exe), and
+# the entire turn budget is burned. Defaulting to `auto-approve` matches the
+# pre-2.14 "YOLO" behavior that vibe-delegate was designed around.
+# Override with the 4th positional arg if you want a different agent.
+# Force the gated default with VIBE_NO_AUTO_APPROVE=1.
+if [ -z "$AGENT" ] && [ "${VIBE_NO_AUTO_APPROVE:-0}" != "1" ]; then
+  AGENT="auto-approve"
+fi
+
 if [ ! -d "$WORKDIR" ]; then
   echo "ERROR: workdir '$WORKDIR' does not exist" >&2
   exit 1
