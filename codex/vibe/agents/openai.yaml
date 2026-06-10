@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vibe Delegate"
+  short_description: "Delegate focused coding tasks to Mistral Vibe."
+  default_prompt: "Use $vibe to delegate a focused coding task to Mistral Vibe and review the diff."
