@@ -1,0 +1,511 @@
+#!/usr/bin/env bash
+# mimo-delegate.win — Windows (Git Bash) delegate for MiMoCode CLI.
+#
+# Adapted from vibe-delegate.win. Key differences:
+#   1. Invokes `mimo run` (MiMoCode CLI) instead of `vibe -p`. The non-interactive
+#      surface is `mimo run <message> --format json --dangerously-skip-permissions`.
+#   2. Mimo's --format json emits one JSON event per line on stdout:
+#        type=step_start / tool_use / step_finish / text
+#      so the parser switches from vibe's role-keyed JSON to event-type-keyed JSON.
+#      Each step_finish carries the full token block (input/output/reasoning/
+#      cache.read/cache.write) and cost. We aggregate those in-stream and skip
+#      the meta.json reader vibe-delegate.win used.
+#   3. Mimo does NOT expose --max-turns. Wall-clock timeout is the only safety
+#      cap; max_turns is recorded in the log but not passed to the CLI.
+#   4. Mimo's --dangerously-skip-permissions replaces vibe's `--trust` and the
+#      auto-approve agent workaround vibe-delegate.win needed.
+#   5. Tool name surface: `bash`, `read`, `write` (filePath/content), `edit`
+#      (filePath/oldString/newString — vibe's search_replace analog). Failures
+#      surface via part.state.status != 'completed' rather than output text.
+#
+# Carried over from vibe-delegate.win without change:
+#   - PYTHONUTF8=1 forces UTF-8 for the embedded Python parser (so cp936/GBK on
+#     Windows doesn't crash on emoji/CJK in mimo output).
+#   - `timeout --foreground` keeps mimo.exe in the foreground process group so
+#     its Windows console handles survive the kill timer.
+#   - The temp prompt file + bash arg dance keeps UTF-8/colons/quotes safe.
+#   - Shared run-log path ~/.local/share/delegate-runs.jsonl so delegate-report
+#     can compare mimo runs against vibe/other delegates.
+#
+# Usage: mimo-delegate.win <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...]
+#   max-turns is recorded for logging only (mimo manages its own turn budget).
+
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
+# Pull out --require "<string>" flags (repeatable) from anywhere in the args,
+# then treat the rest as positional. Each required string must already exist in
+# the workdir or the run is aborted before launch (see pre-flight gate below).
+REQUIRES=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --require) REQUIRES+=("$2"); shift 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
+
+WORKDIR="${1:?Usage: mimo-delegate.win <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...]}"
+PROMPT="${2:?Prompt required}"
+MAX_TURNS="${3:-10}"
+AGENT="${4:-}"
+TIMEOUT_SECS="${5:-180}"
+
+if [ ! -d "$WORKDIR" ]; then
+  echo "ERROR: workdir '$WORKDIR' does not exist" >&2
+  exit 1
+fi
+
+# Pre-flight gate: an `edit` call can't match an anchor that isn't in the file,
+# so abort before wasting a mimo run if any --require string is absent. Turns
+# the "grep the target first" rule into an enforced check; logs a cheap
+# precheck_abort entry.
+if [ "${#REQUIRES[@]}" -gt 0 ]; then
+  MISSING=()
+  for s in "${REQUIRES[@]}"; do
+    grep -rqF -- "$s" "$WORKDIR" 2>/dev/null || MISSING+=("$s")
+  done
+  if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo "=== PRECHECK ABORT — required string(s) not found in $WORKDIR ==="
+    for s in "${MISSING[@]}"; do echo "  missing: $s"; done
+    echo "Nothing was launched. Fix the anchor (grep locally) or the workdir, then retry."
+    python3 - "$WORKDIR" <<'PYABORT'
+import json, os, sys
+from pathlib import Path
+from datetime import datetime, timezone
+wd = sys.argv[1]
+LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
+LOG.parent.mkdir(parents=True, exist_ok=True)
+entry = {
+    'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'delegate': 'mimo', 'workdir': wd, 'project': os.path.basename(wd.rstrip('/')),
+    'exit_code': 2, 'tool_calls': 0, 'files_changed': 0, 'tokens_total': 0,
+    'duration_secs': 0, 'failure_reason': 'precheck_abort',
+}
+with open(LOG, 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+PYABORT
+    exit 2
+  fi
+fi
+
+# Model override: /mimo-model-pick writes the `-m provider/model` string to this
+# flag file. Forwarded to mimo via `-m` below.
+MIMO_MODEL_FLAG="$HOME/.local/share/mimo-model.flag"
+MIMO_MODEL_OVERRIDE=""
+if [ -f "$MIMO_MODEL_FLAG" ]; then
+  MIMO_MODEL_OVERRIDE=$(tr -d '[:space:]' < "$MIMO_MODEL_FLAG")
+fi
+
+cd "$WORKDIR"
+START_NS=$(date +%s%N)
+PROMPT_WORDS=$(printf '%s' "$PROMPT" | wc -w | tr -d ' ')
+GIT_BEFORE=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
+
+# Track modified files for post-run syntax checks
+FILES_BEFORE=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
+
+echo "=== MIMO START ==="
+echo "Workdir : $WORKDIR"
+echo "Agent   : ${AGENT:-(default)}"
+echo "Model   : ${MIMO_MODEL_OVERRIDE:-(mimo default — mimo-auto on free tier)}"
+echo "Turns   : ${MAX_TURNS} (log-only; mimo manages turn budget)"
+echo "Timeout : ${TIMEOUT_SECS}s"
+echo "WinGuard: ${MIMO_WIN_PREAMBLE:-off}"
+echo "Prompt  : ${PROMPT:0:120}..."
+echo "=================="
+
+# Write prompt to a temp file — avoids shell injection when prompt contains
+# colons, quotes, emojis, accented chars, or multi-line Python/JS code.
+PROMPT_FILE=$(mktemp /tmp/mimo-prompt-XXXXXX.txt)
+printf '%s' "$PROMPT" > "$PROMPT_FILE"
+
+# Stats handoff file: Python parser writes JSON here; bash reads it for the log.
+DELEGATE_STATS_FILE=$(mktemp /tmp/delegate-stats-XXXXXX.json)
+printf '{}' > "$DELEGATE_STATS_FILE"
+export DELEGATE_STATS_FILE
+
+trap 'rm -f "$PROMPT_FILE" "$DELEGATE_STATS_FILE"' EXIT
+
+PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+
+# Windows shell-fallback guard (auto-injected preamble).
+# Inherited from vibe-delegate.win but defaults OFF on mimo. Reason: vibe needed
+# this preamble because its `default` agent gated tool approval, causing mimo to
+# fall back to cmd.exe shell commands that crash on Windows. Mimo's
+# `--dangerously-skip-permissions` already bypasses any approval gate, so the
+# shell-fallback loop doesn't occur. Empirically, leaving the preamble on hurts
+# mimo: multi-step tasks (e.g. "create calc.py + test_calc.py and run tests")
+# timeout with 0 tool calls because mimo's "no shell" directive conflicts with
+# its desire to run tests via bash. Opt in with MIMO_WIN_PREAMBLE=on if you
+# specifically observe shell-fallback loops on a future task.
+if [ "${MIMO_WIN_PREAMBLE:-off}" = "on" ]; then
+  WIN_PREAMBLE='WINDOWS HOST RULES (auto-injected by mimo-delegate.win):
+- Use ONLY the `write` and `edit` tools to create or modify files.
+- Do NOT use shell commands (bash, powershell, cmd) to write, create, or copy
+  files. The host shell is cmd.exe / Git Bash; "mkdir -p", "echo <html>",
+  and PowerShell heredocs will all fail or produce wrong line endings.
+- If `write` or `edit` itself fails twice on the same file, STOP and report
+  the error — do not fall back to shell. Looping wastes the turn budget.
+- Paths use forward slashes (e.g. J:/foo/bar.html); they are already absolute.
+
+---
+
+'
+  PROMPT_CONTENT="${WIN_PREAMBLE}${PROMPT_CONTENT}"
+fi
+
+# Build mimo args. `mimo run` takes the message as a positional arg.
+MIMO_ARGS=(run --format json --dangerously-skip-permissions "$PROMPT_CONTENT")
+[ -n "$MIMO_MODEL_OVERRIDE" ] && MIMO_ARGS=(-m "$MIMO_MODEL_OVERRIDE" "${MIMO_ARGS[@]}")
+[ -n "$AGENT" ]               && MIMO_ARGS=(--agent "$AGENT" "${MIMO_ARGS[@]}")
+
+timeout --foreground "$TIMEOUT_SECS" mimo "${MIMO_ARGS[@]}" | python3 -c "
+import sys, json, os
+
+tools_called = 0
+warn_count   = 0
+sr_fails     = 0
+writes       = []
+tokens_in    = 0
+tokens_out   = 0
+cost_total   = 0.0
+last_model   = ''
+
+# Mimo tool surface (observed via probe runs):
+#   bash   — shell commands
+#   read   — file read (input.filePath)
+#   write  — create file (input.filePath, input.content)
+#   edit   — modify file (input.filePath, input.oldString, input.newString)
+#   grep / glob — search
+WRITE_TOOLS = {'write', 'edit', 'multiedit', 'patch'}
+
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+
+    typ  = ev.get('type', '')
+    part = ev.get('part', {}) or {}
+
+    if typ == 'tool_use':
+        tools_called += 1
+        tool   = part.get('tool', '') or ''
+        state  = part.get('state', {}) or {}
+        inp    = state.get('input', {}) or {}
+        status = state.get('status', '')
+        title  = state.get('title', '') or ''
+
+        filepath = inp.get('filePath') or inp.get('file_path') or inp.get('path') or ''
+        desc     = inp.get('description', '') or ''
+
+        # Failure detection from state.status (more reliable than output parsing)
+        if status not in ('completed', '', None):
+            warn_count += 1
+            print(f'  [WARN]  {tool} status={status}: {(desc or title or filepath)[:100]}', flush=True)
+            continue
+
+        if tool in WRITE_TOOLS:
+            if filepath:
+                writes.append(filepath)
+            # An edit whose oldString isn't in the file would show as an error
+            # status above; if we get here with tool=edit, treat it as OK.
+            tag = 'edit' if tool == 'edit' else 'write'
+            print(f'  [tool]  {tag} [OK]  {filepath[:100]}', flush=True)
+            if tool == 'edit' and status not in ('completed', '', None):
+                sr_fails += 1
+        elif tool == 'read':
+            print(f'  [read]  {filepath[:100]}', flush=True)
+        elif tool == 'bash':
+            cmd = inp.get('command', '') or ''
+            print(f'  [tool]  bash: {(desc or cmd)[:100]}', flush=True)
+        elif tool in ('grep', 'glob'):
+            pattern = inp.get('pattern', '') or inp.get('query', '') or ''
+            print(f'  [tool]  {tool}: {pattern[:100]}', flush=True)
+        else:
+            print(f'  [tool]  {tool}: {(desc or title or filepath)[:100]}', flush=True)
+
+    elif typ == 'step_finish':
+        toks = part.get('tokens', {}) or {}
+        # Mimo's tokens.input is the non-cached input for the step. cache.read
+        # is reported separately and excluded from input on the free tier (cost=0
+        # anyway). When paid providers are configured, cache.read is typically
+        # priced at a discount — keeping it out of tokens_in yields the same
+        # 'cost-equivalent input' shape vibe-delegate used for its cost line.
+        ti = int(toks.get('input', 0) or 0)
+        to = int(toks.get('output', 0) or 0)
+        tokens_in  += ti
+        tokens_out += to
+        try:
+            cost_total += float(part.get('cost') or 0)
+        except (TypeError, ValueError):
+            pass
+
+    elif typ == 'text':
+        text = (part.get('text', '') or '').strip()
+        if text:
+            print(f'  [mimo]  {text[:400]}', flush=True)
+
+    elif typ == 'step_start':
+        pass  # quiet
+
+# step_finish events carry tokens but not the model name. Mimo writes session
+# JSON to ~/.local/share/mimocode/ if a future need to read it arises; the
+# free-tier model is mimo-auto by convention.
+print(f'Tool calls: {tools_called}  |  warns: {warn_count}  |  sr_fails: {sr_fails}')
+
+tokens_total = tokens_in + tokens_out
+
+# Free tier: cost is 0. For paid providers the per-step cost was summed above.
+# Claude Sonnet 4.6 equivalent for the savings line: \$3/M input, \$15/M output.
+claude_cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+
+if tokens_total > 0:
+    print(f'Delegate tokens (run): {tokens_total:,}  (in: {tokens_in:,} / out: {tokens_out:,})  |  cost ~\${cost_total:.4f}')
+    if cost_total > 0:
+        ratio = claude_cost / cost_total
+        print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{ratio:.1f})')
+    else:
+        print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (mimo free: \$0)')
+
+# Persist stats for the bash run-log writer.
+sf = os.environ.get('DELEGATE_STATS_FILE', '')
+if sf:
+    try:
+        with open(sf, 'w') as f:
+            json.dump({
+                'tool_calls': tools_called,
+                'warn_count': warn_count,
+                'search_replace_fails': sr_fails,
+                'tokens_in':    tokens_in,
+                'tokens_out':   tokens_out,
+                'tokens_total': tokens_total,
+                'cost_usd':     round(cost_total, 6),
+                'model':        last_model or 'mimo-auto',
+            }, f)
+    except Exception:
+        pass
+"
+MIMO_EXIT=${PIPESTATUS[0]}
+
+echo ""
+if [ "$MIMO_EXIT" -eq 124 ]; then
+  echo "=== MIMO TIMEOUT (>${TIMEOUT_SECS}s) — killed ==="
+else
+  echo "=== MIMO DONE (exit: $MIMO_EXIT) ==="
+fi
+
+# ── Post-run syntax checks — language-agnostic (copied from vibe-delegate.win) ─
+FILES_AFTER=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
+CHANGED=$(comm -13 <(echo "$FILES_BEFORE" | sort) <(echo "$FILES_AFTER" | sort) 2>/dev/null)
+
+SYNTAX_COUNT_FILE=$(mktemp /tmp/mimo-syntax-count-XXXXXX.txt)
+echo 0 > "$SYNTAX_COUNT_FILE"
+export DELEGATE_CHANGED="$CHANGED"
+export SYNTAX_COUNT_FILE
+
+python3 << 'PYSYNTAX'
+import os, shutil, subprocess
+
+changed = [f for f in os.environ.get('DELEGATE_CHANGED', '').splitlines() if f.strip()]
+errors  = 0
+checked = 0
+
+def has(cmd):
+    return shutil.which(cmd) is not None
+
+def check(cmd, label, cwd=None):
+    global errors, checked
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    checked += 1
+    if r.returncode != 0:
+        errors += 1
+        msg = (r.stderr or r.stdout).strip().split('\n')[0][:120]
+        print(f'  [SYNTAX ERROR] {label}: {msg}')
+
+for f in changed:
+    if not os.path.isfile(f):
+        continue
+    if   f.endswith('.py'):
+        check(['python3', '-m', 'py_compile', f], f)
+    elif f.endswith(('.js', '.mjs', '.cjs')) and has('node'):
+        check(['node', '--check', f], f)
+    elif f.endswith('.rb') and has('ruby'):
+        check(['ruby', '-c', f], f)
+    elif f.endswith(('.sh', '.bash')):
+        check(['bash', '-n', f], f)
+    elif f.endswith('.php') and has('php'):
+        check(['php', '-l', f], f)
+    elif f.endswith('.json'):
+        check(['python3', '-c', 'import json,sys;json.load(open(sys.argv[1]))', f], f)
+
+live = [f for f in changed if os.path.isfile(f)]
+if any(f.endswith('.go') for f in live) and has('go'):
+    check(['go', 'vet', './...'], 'go vet')
+if any(f.endswith('.rs') for f in live) and has('cargo'):
+    check(['cargo', 'check', '--quiet'], 'cargo check')
+if any(f.endswith(('.ts', '.tsx')) for f in live):
+    if has('tsc') and os.path.isfile('tsconfig.json'):
+        check(['tsc', '--noEmit', '--skipLibCheck'], 'tsc --noEmit')
+    else:
+        print('  [SKIP] tsc — no tsconfig.json found, TypeScript not checked')
+
+if checked > 0:
+    if errors == 0:
+        print(f'=== SYNTAX OK ({checked} check(s)) ===')
+    else:
+        print(f'=== SYNTAX ERRORS: {errors} in {checked} check(s) — fix before committing ===')
+
+cf = os.environ.get('SYNTAX_COUNT_FILE', '')
+if cf:
+    with open(cf, 'w') as fh:
+        fh.write(str(errors))
+PYSYNTAX
+
+TOTAL_ERRORS=$(cat "$SYNTAX_COUNT_FILE" 2>/dev/null || echo 0)
+rm -f "$SYNTAX_COUNT_FILE"
+
+# ── Git summary ────────────────────────────────────────────────────────────────
+GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
+
+if [ "$GIT_BEFORE" != "$GIT_AFTER" ]; then
+  echo ""
+  echo "=== COMMITS CREATED ==="
+  git log "$GIT_BEFORE".."$GIT_AFTER" --oneline
+  echo ""
+  echo "=== DIFF STAT ==="
+  git diff "$GIT_BEFORE".."$GIT_AFTER" --stat
+else
+  echo ""
+  echo "=== UNCOMMITTED CHANGES ==="
+  git diff --stat 2>/dev/null || echo "(no git)"
+  git status --short 2>/dev/null
+fi
+
+
+# ── Run log ────────────────────────────────────────────────────────────────────
+END_NS=$(date +%s%N)
+FILES_CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' 2>/dev/null)
+FILES_CHANGED_COUNT=${FILES_CHANGED_COUNT:-0}
+TOTAL_ERRORS=${TOTAL_ERRORS:-0}
+
+export DELEGATE_NAME="mimo"
+export DELEGATE_WORKDIR="$WORKDIR"
+export DELEGATE_EXIT="$MIMO_EXIT"
+export DELEGATE_TIMEOUT="$TIMEOUT_SECS"
+export DELEGATE_PROMPT_WORDS="$PROMPT_WORDS"
+export DELEGATE_AGENT="${AGENT:-default}"
+export DELEGATE_MAX_TURNS="$MAX_TURNS"
+export DELEGATE_FILES_CHANGED="$FILES_CHANGED_COUNT"
+export DELEGATE_SYNTAX_ERRORS="$TOTAL_ERRORS"
+export DELEGATE_START_NS="$START_NS"
+export DELEGATE_END_NS="$END_NS"
+export DELEGATE_PROMPT_FILE="$PROMPT_FILE"
+
+python3 << 'PYLOG'
+import json, os, re
+from pathlib import Path
+from datetime import datetime, timezone
+
+LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
+LOG.parent.mkdir(parents=True, exist_ok=True)
+
+sf = os.environ.get('DELEGATE_STATS_FILE', '')
+stats = {}
+if sf:
+    try:
+        stats = json.loads(Path(sf).read_text())
+    except Exception:
+        pass
+
+start_ns = int(os.environ.get('DELEGATE_START_NS', 0) or 0)
+end_ns   = int(os.environ.get('DELEGATE_END_NS',   0) or 0)
+duration = round((end_ns - start_ns) / 1e9, 1) if start_ns and end_ns else 0
+
+prompt_text = ''
+pf = os.environ.get('DELEGATE_PROMPT_FILE', '')
+if pf:
+    try:
+        prompt_text = Path(pf).read_text(errors='replace')
+    except Exception:
+        pass
+
+adaptations = []
+if prompt_text:
+    if re.search(r'\bdef \w+\s*\(|->|\bCallable\b|: \w+\[', prompt_text):
+        adaptations.append('contract')
+    if re.search(r'OUTPUT\s+FORMAT|Modified:|Created/Modified:|Does:', prompt_text, re.I):
+        adaptations.append('output_format')
+    if len(prompt_text.split()) < 80:
+        adaptations.append('compact')
+
+entry = {
+    'ts':            datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'delegate':      os.environ.get('DELEGATE_NAME', 'mimo'),
+    'workdir':       os.environ.get('DELEGATE_WORKDIR', ''),
+    'project':       os.path.basename(os.environ.get('DELEGATE_WORKDIR', '')),
+    'prompt_words':  int(os.environ.get('DELEGATE_PROMPT_WORDS', 0) or 0),
+    'agent':         os.environ.get('DELEGATE_AGENT', 'default'),
+    'max_turns':     int(os.environ.get('DELEGATE_MAX_TURNS', 0) or 0),
+    'timeout_secs':  int(os.environ.get('DELEGATE_TIMEOUT', 0) or 0),
+    'exit_code':     int(os.environ.get('DELEGATE_EXIT', 0) or 0),
+    'timed_out':     os.environ.get('DELEGATE_EXIT') == '124',
+    'files_changed':        int(os.environ.get('DELEGATE_FILES_CHANGED', 0) or 0),
+    'syntax_errors':        int(os.environ.get('DELEGATE_SYNTAX_ERRORS', 0) or 0),
+    'duration_secs':        duration,
+    'warn_count':           stats.get('warn_count', 0),
+    'search_replace_fails': stats.get('search_replace_fails', 0),
+    'adaptations':          adaptations,
+}
+entry.update(stats)
+
+ti = entry.get('tokens_in', 0)
+to = entry.get('tokens_out', 0)
+entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
+
+_readonly_agents = ('code-reviewer', 'code-architect', 'planner')
+_tok_out  = entry.get('tokens_out', 0) or 0
+_tc       = entry.get('tool_calls', 0) or 0
+_fc       = entry.get('files_changed', 0) or 0
+_exit     = entry.get('exit_code', 0)
+_agent    = entry.get('agent', 'default')
+
+if entry.get('timed_out'):
+    _reason = 'timeout'
+elif _exit not in (0, 124):
+    _reason = 'exit_error'
+elif entry.get('syntax_errors', 0) > 0:
+    _reason = 'syntax_error'
+elif entry.get('search_replace_fails', 0) > 0:
+    _reason = 'sr_fail'
+elif _tok_out == 0 and _tc == 0 and _agent not in _readonly_agents:
+    _reason = 'silent_exit'
+elif _tok_out < 50 and _fc == 0 and _tc < 3 and _agent not in _readonly_agents:
+    _reason = 'near_empty'
+elif _fc == 0 and _tc >= 3 and _exit == 0 and _agent not in _readonly_agents:
+    _reason = 'wrote_nothing'
+elif entry.get('warn_count', 0) > 0:
+    _reason = 'warn_only'
+else:
+    _reason = 'ok'
+
+entry['failure_reason'] = _reason
+entry['wrote_nothing'] = _reason in ('wrote_nothing', 'silent_exit', 'near_empty')
+
+with open(LOG, 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+
+tok = entry.get('tokens_total', '?')
+saved = entry['cost_claude_eq'] - entry.get('cost_usd', 0)
+saved_str = f', saved ~${saved:.4f} vs Claude' if saved > 0 else ''
+adapt_str = f'  [{",".join(adaptations)}]' if adaptations else ''
+reason_str = f'  {_reason}' if _reason != 'ok' else ''
+print(f'[log] → {LOG}  ({tok} tokens, exit {_exit}, {duration}s{saved_str}{reason_str}{adapt_str})')
+PYLOG
+
+exit $MIMO_EXIT

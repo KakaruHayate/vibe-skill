@@ -1,13 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pm2 list *)",
-      "Bash(pm2 logs *)",
-      "Bash(pm2 show *)",
-      "Bash(systemctl --user status *)",
-      "Bash(systemctl status *)",
-      "Bash(systemctl --user list-units *)",
-      "Bash(~/tools/delegate-report *)"
+      "Bash(mimo run *)",
+      "Bash(mimo providers *)",
+      "Bash(mimo models *)",
+      "Bash(~/tools/mimo-delegate *)",
+      "Bash(~/tools/mimo-delegate.win *)",
+      "Bash(~/tools/delegate-report *)",
+      "Bash(touch ~/.local/share/mimo-auto.flag)",
+      "Bash(rm -f ~/.local/share/mimo-auto.flag)",
+      "Bash(rm -f ~/.local/share/mimo-model.flag)",
+      "Bash(test -f ~/.local/share/mimo-auto.flag*)",
+      "Bash(cat ~/.local/share/mimo-model.flag*)",
+      "Bash(echo * > ~/.local/share/mimo-model.flag)"
     ]
   }
 }

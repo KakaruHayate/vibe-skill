@@ -1,9 +1,9 @@
 ---
-name: vibe
+name: mimo
 description: >
-  Delegate a coding task to Mistral Vibe and supervise the result via git diff.
-  Trigger: /vibe <instruction>. Claude orchestrates, Vibe codes.
-  Also handles /vibe-report [--since N] [--project NAME] [--fails] — token/cost/failure report.
+  Delegate a coding task to MiMoCode (free tier, mimo-auto) and supervise the result via git diff.
+  Trigger: /mimo <instruction>. Claude orchestrates, Mimo codes.
+  Also handles /mimo-report [--since N] [--project NAME] [--fails] — token/cost/failure report.
 license: MIT
 user-invocable: true
 allowed-tools:
@@ -12,38 +12,38 @@ allowed-tools:
   - grep
 ---
 
-# Vibe Orchestrator
+# Mimo Orchestrator
 
-## /vibeon | /vibeoff | /vibestatus
+## /mimoon | /mimooff | /mimostatus
 
-Toggle auto-delegate mode — Vibe automatically handles coding tasks without requiring `/vibe` each time.
+Toggle auto-delegate mode — Mimo automatically handles coding tasks without requiring `/mimo` each time.
 
 | Command | Action |
 |---------|--------|
-| `/vibeon` | `touch ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe ON" |
-| `/vibeoff` | `rm -f ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe OFF" |
-| `/vibestatus` | report auto-mode (ON/OFF) **and** active model override |
+| `/mimoon` | `touch ~/.local/share/mimo-auto.flag → "Auto-mimo ON" |
+| `/mimooff` | `rm -f ~/.local/share/mimo-auto.flag` → confirm "Auto-mimo OFF" |
+| `/mimostatus` | report auto-mode (ON/OFF) **and** active model override |
 
-For `/vibestatus`, run both checks and print two lines:
+For `/mimostatus`, run both checks and print two lines:
 ```
-Auto-vibe: ON | OFF
-Model: <alias>  (override)  OR  Model: deepseek-flash  (config default)
+Auto-mimo: ON | OFF
+Model: <alias>  (override)  OR  Model: (mimo default — mimo-auto on free tier)
 ```
 
 ### Auto-mode pre-filter (when flag is set)
 
-When `vibe-auto.flag` exists, apply this gate **before** loading the full skill:
+When `mimo-auto.flag` exists, apply this gate **before** loading the full skill:
 
 | Task signal | Action |
 |---|---|
 | 1 file, ≤10 lines, exact location already known | Edit directly — do NOT invoke the skill |
-| Logic non-trivial, location unclear, multiple files, HTML/JS content, or >1 change | Invoke `/vibe` as normal |
+| Logic non-trivial, location unclear, multiple files, HTML/JS content, or >1 change | Invoke `/mimo` as normal |
 
 ---
 
-## /vibe-report
+## /mimo-report
 
-If the user invokes `/vibe-report`, run `~/tools/delegate-report` with any flags
+If the user invokes `/mimo-report`, run `~/tools/delegate-report` with any flags
 extracted from the arguments, display output verbatim, and stop.
 
 | User says | Flag |
@@ -55,38 +55,42 @@ extracted from the arguments, display output verbatim, and stop.
 | "adapt", "adaptations", "by adaptation" | `--adapt` |
 | "all delegates", "everything", "compare delegates" | `--all` |
 | "delegate foo", "only opencode" | `--delegate foo` |
-| (nothing) | (no flags — vibe runs only) |
+| (nothing) | (no flags — mimo runs only) |
 
-The report defaults to **vibe runs only**. The log is shared across delegate
-tools (vibe, opencode, gemini); use `--all` for the cross-delegate comparison
+The report defaults to **mimo runs only**. The log is shared across delegate
+tools (mimo, vibe, opencode, gemini); use `--all` for the cross-delegate comparison
 or `--delegate NAME` to scope to a different one.
 
 ---
 
-## /vibe-model-pick | /vibe-model-clear
+## /mimo-model-pick | /mimo-model-clear
 
-Override the Vibe model for all subsequent delegations without touching `~/.vibe/config.toml`.
+Override the Mimo model for all subsequent delegations.
 
 | Command | Action |
 |---------|--------|
-| `/vibe-model-pick <alias>` | `echo <alias> > ~/.local/share/vibe-model.flag` → confirm |
-| `/vibe-model-clear` | `rm -f ~/.local/share/vibe-model.flag` → confirm "back to config default" |
+| `/mimo-model-pick <alias>` | `echo <-m value> > ~/.local/share/mimo-model.flag` → confirm |
+| `/mimo-model-clear` | `rm -f ~/.local/share/mimo-model.flag` → confirm "back to config default" |
 
-**Available aliases** (from `~/.vibe/config.toml`):
+**Available aliases** (writes the `-m provider/model` string to the flag file):
 
-| Alias | Model | Provider | Notes |
-|-------|-------|----------|-------|
-| `deepseek-flash` | deepseek-v4-flash | DeepSeek | Default — fast, cheap; solid for inline edits |
-| `mistral-medium-3.5` | mistral-vibe-cli-latest | Mistral | Stronger reasoning; reliable for inline edits |
-| `devstral-small` | devstral-small-latest | Mistral | Agent-mode — read/explore only, weak at inline edits |
-| `local` | devstral (llamacpp) | Local | Requires local server on :8080 |
+| Alias | -m value | Notes |
+|-------|----------|-------|
+| `auto` | `mimo/mimo-auto` | **Default** — free tier, no API key needed |
+| `anthropic-sonnet` | `anthropic/claude-sonnet-4-6` | Requires ANTHROPIC_API_KEY configured via `mimo providers` |
+| `anthropic-opus` | `anthropic/claude-opus-4-7` | Requires ANTHROPIC_API_KEY |
+| `openai-gpt5` | `openai/gpt-5` | Requires OPENAI_API_KEY |
+| `deepseek-v3` | `deepseek/deepseek-chat` | Requires DEEPSEEK_API_KEY |
+
+The mimo default (no flag set) is `mimo-auto` from the free tier — runs at $0.
 
 Run the bash command, print one confirmation line showing the active model, and stop.
 
 ---
 
-When the user invokes `/vibe <instruction>`, Claude delegates the implementation
-to Mistral Vibe via its programmatic mode, supervises in real time, and reports.
+When the user invokes `/mimo <instruction>`, Claude delegates the implementation
+to MiMoCode via its `mimo run --format json --dangerously-skip-permissions` mode,
+supervises in real time, and reports.
 
 ---
 
@@ -94,13 +98,46 @@ to Mistral Vibe via its programmatic mode, supervises in real time, and reports.
 
 Hard constraints — not config options. Full details in `SKILL-reference.md`.
 
-- **UTF-8 / special chars** → silent `search_replace` match failure. Use `python3 str.replace()` for accented chars or emoji.
-- **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
-- **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
-- **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **Open-ended prompts on large files** → on files >300 LOC, prompts that describe a bug ("fix this method, here's the buggy code…") cause the model to spend its output budget writing prose **before any tool call**. Symptom: `Tool calls: 0`, output tokens 3000+, timeout, empty diff. Both `deepseek-flash` and `mistral-medium-3.5` fail this way on the same file. **Fix**: rephrase as a closed-form OLD/NEW prompt (Step 3) when the change is precisely known. Real test on a 600-line C# file — open-ended: 0 tool calls / 188s timeout. Closed-form (same model): 2 tool calls / 35s / exit 0.
-- **Windows tool-approval gate** (root cause) → vibe 2.14's `default` agent requires interactive approval for every tool call. In `-p` programmatic mode there's no way to answer the prompt, so on Windows every `file:` call returns `Tool execution not permitted`. The model then loops on `cmd.exe` shell fallbacks (`mkdir -p`, PowerShell heredocs, `echo <html>` redirects) and burns the turn budget. `vibe-delegate.win` defaults the agent to `auto-approve` (override with 4th arg or `VIBE_NO_AUTO_APPROVE=1`). A "no shell for file I/O" preamble is also auto-injected as belt-and-suspenders for models that still wander off — disable with `VIBE_WIN_PREAMBLE=off`.
-- **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
+- **UTF-8 / special chars** → an `edit` whose `oldString` doesn't match byte-for-byte
+  returns an error status. Grep the literal anchor locally before delegating; pass
+  it via `--require "anchor"` to abort before launch if it's gone.
+- **Code duplication** → Mimo may re-insert a block already written. Grep for
+  duplicate definitions after every run.
+- **HTML in prompt** → tags like `<div>` are shell redirects (exit 127) when the
+  prompt is interpolated naively. The script writes the prompt to a temp file —
+  safe — but if you pipe HTML through a shell wrapper yourself, write it to a
+  file first and reference the path in the prompt.
+- **Source code in bash heredoc** → quotes/backslashes mangle. Use `edit`
+  directly; never a helper script that replaces code.
+- **Open-ended prompts on large files** → on files >300 LOC, prompts that
+  describe a bug ("fix this method, here's the buggy code…") often cause the
+  model to spend its output budget writing prose **before any tool call**.
+  Symptom: `Tool calls: 0` or 1, output tokens 1000+, timeout, empty diff.
+  **Fix**: rephrase as a closed-form OLD/NEW prompt (Step 3) when the change is
+  precisely known. Evidence carried over from vibe-skill: a 600-line C# file
+  flipped from `0 tool calls / 188s timeout` (open-ended) to `2 tool calls /
+  35s / exit 0` (closed-form). Equivalent measurements on mimo-auto TBD on
+  first real workload.
+- **No --max-turns** → unlike vibe, mimo manages its own turn budget. The 3rd
+  positional arg to mimo-delegate is recorded in the log only; the only real
+  safety is wall-clock timeout. Bump `timeout-secs` (5th arg) for large refactors.
+- **Free tier (mimo-auto)** → cost is $0 per the `step_finish.cost` field, but
+  free tier may rate-limit per-fingerprint. If runs start returning empty
+  output / quick errors, check `mimo providers` to see if the free quota is
+  exhausted, and fall back to `/mimo-model-pick anthropic-sonnet` (if you have
+  a key) or wait.
+- **`MIMO_WIN_PREAMBLE` is opt-in, not default** → vibe-delegate auto-injected
+  a "no shell for file I/O" preamble; mimo-delegate inherited it but found it
+  causes multi-step tasks (e.g. "create files and run tests") to time out with
+  0 tool calls — the directive conflicts with mimo's legitimate use of `bash`
+  to verify its own work. Mimo's `--dangerously-skip-permissions` already
+  prevents the shell-fallback loop the preamble was designed for, so the
+  preamble defaults to **off**. Turn it on with `MIMO_WIN_PREAMBLE=on` only if
+  you actually observe a shell-fallback loop on some future task.
+- **Orchestration chain** → 5 failure points in order: CLI auth → JSON event
+  stream parser → token aggregation → git diff → run-log JSON. When a run
+  produces unexpected results, work down this list. Full details in
+  `SKILL-reference.md`.
 
 ---
 
@@ -118,8 +155,8 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 | Size | Definition | Max turns | Approach |
 |------|-----------|-----------|----------|
 | **Trivial** | 1 file, change is obvious and located | — | **Skip delegation — edit directly** |
-| **Simple** | 1 file, non-trivial logic or unknown location | 5–8 | 1 vibe call |
-| **Medium** | 2–3 related files, 1 objective | 8–12 | 1 structured vibe call |
+| **Simple** | 1 file, non-trivial logic or unknown location | 5–8 | 1 mimo call |
+| **Medium** | 2–3 related files, 1 objective | 8–12 | 1 structured mimo call |
 | **Complex** | >3 files OR business logic OR DB migrations | — | **Break into sub-tasks** |
 
 **Decomposition for complex tasks:**
@@ -133,7 +170,7 @@ Sub-task 4: Verify / test (5 turns)
 
 ---
 
-## Step 3 — Write the Vibe prompt
+## Step 3 — Write the Mimo prompt
 
 The prompt must be **self-contained**.
 
@@ -175,7 +212,7 @@ Template (paste literally; the script forwards it via temp file so indentation i
 ```
 File: <path/relative/to/workdir>
 
-Perform exactly N search_replace operations. Do NOT read the file first. Do NOT explain. Just run the tool calls then stop.
+Perform exactly N edit operations. Do NOT read the file first. Do NOT explain. Just run the tool calls then stop.
 
 ==========
 REPLACEMENT 1:
@@ -193,7 +230,7 @@ OLD:
 NEW:
 ...
 
-After all search_replace succeed, stop. No verification, no comment.
+After all edit succeed, stop. No verification, no comment.
 ```
 
 **Use this form when:**
@@ -205,7 +242,7 @@ After all search_replace succeed, stop. No verification, no comment.
 - The model needs to discover the location or design the change → use the open-ended Structure above
 - Later replacements depend on earlier model-generated content
 
-**Why it works**: with literal OLD/NEW, the model has no reasoning gap to fill with prose. It functions as a stenographer for `search_replace`. Real comparison on a 600-line C# file, same workdir:
+**Why it works**: with literal OLD/NEW, the model has no reasoning gap to fill with prose. It functions as a stenographer for `edit`. Evidence carried over from vibe-skill (600-line C# file, same workdir):
 
 | Prompt shape | Model | Tool calls | Duration | Result |
 |---|---|---|---|---|
@@ -214,10 +251,10 @@ After all search_replace succeed, stop. No verification, no comment.
 | Closed-form OLD/NEW | mistral-medium-3.5 | 2 | 47s | ✅ 41+/17- |
 | Closed-form OLD/NEW | deepseek-flash | 2 | 35s | ✅ 41+/17- (identical) |
 
-For closed-form prompts on existing files, **`deepseek-flash` is ~13× cheaper than mistral with no quality loss**. Save mistral for cases that genuinely need design reasoning or new-file creation.
+The mimo equivalent measurement is TBD; the rule (closed-form OLD/NEW beats open-ended on large files) is model-shape, not model-name, so we expect it to hold on `mimo-auto` too. **Re-measure once you have ≥3 closed-form runs on files >300 LOC** and update this table.
 
 > ⚠️ **Shell safety**: if the prompt contains UTF-8 accented chars, emojis,
-> `:` in Python/YAML code, or typographic apostrophes — the vibe-delegate script
+> `:` in Python/YAML code, or typographic apostrophes — the mimo-delegate script
 > passes them safely via a temp file (`printf %q`). Never interpolate such a prompt
 > directly into a bash heredoc.
 
@@ -228,10 +265,10 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 
 ---
 
-## Step 4 — Launch Vibe
+## Step 4 — Launch Mimo
 
 ```bash
-~/tools/vibe-delegate "<workdir>" "<prompt>" [max-turns] [agent] [timeout-secs]
+~/tools/mimo-delegate "<workdir>" "<prompt>" [max-turns] [agent] [timeout-secs]
 ```
 
 | Argument       | Default  | Notes                                           |
@@ -241,7 +278,7 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `max-turns`    | `10`     | Mistral turn limit — hard cap at 12, never more |
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer. Bump to `600` for open-ended prompts on files >300 LOC; closed-form OLD/NEW prompts (Step 3) typically finish in 30-60s and don't need it |
-| `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
+| `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `edit` anchor here |
 
 **Available agents:**
 
@@ -260,8 +297,8 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 
 **Background launch:**
 ```bash
-~/tools/vibe-delegate "<workdir>" "<prompt>" 10 > /tmp/vibe_out.txt 2>&1 &
-# Monitor with: tail -f /tmp/vibe_out.txt
+~/tools/mimo-delegate "<workdir>" "<prompt>" 10 > /tmp/mimo_out.txt 2>&1 &
+# Monitor with: tail -f /tmp/mimo_out.txt
 ```
 
 ---
@@ -270,51 +307,51 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 
 The script prints live:
 ```
-=== VIBE START ===
+=== MIMO START ===
 Workdir : /path/to/project
-Agent   : default
-Turns   : 10
+Agent   : (default)
+Model   : (mimo default — mimo-auto on free tier)
+Turns   : 10 (log-only; mimo manages turn budget)
 Timeout : 180s
 Prompt  : Stack: Python/Flask. File: app.py ...
-===================
+==================
   [read]  app.py
-  [tool]  file: app.py
-  [tool]  search_replace [OK] ...
-  [vibe]  Done. Converted date to datetime.date in fetch_data().
-Tool calls: 5
-Delegate tokens (run): 4,800  (last turn: 4,600+200)  |  cost ~$0.0086
-Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
-=== VIBE DONE (exit: 0) ===
+  [tool]  edit [OK]  app.py
+  [mimo]  Done. Converted date to datetime.date in fetch_data().
+Tool calls: 3  |  warns: 0  |  sr_fails: 0
+Delegate tokens (run): 4,800  (in: 4,600 / out: 200)  |  cost ~$0.0000
+Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (mimo free: $0)
+=== MIMO DONE (exit: 0) ===
 === SYNTAX OK (1 check(s)) ===
 
 === UNCOMMITTED CHANGES ===
  app.py | 4 ++--
-[log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s)
+[log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s, saved ~$0.0168 vs Claude)
 ```
 
-**Vibe never commits.** All changes are left unstaged — `git checkout .` reverts everything if needed.
+**Mimo never commits.** All changes are left unstaged — `git checkout .` reverts everything if needed.
 
 **Red flags to act on immediately:**
 
 | Flag | Meaning | Action |
 |------|---------|--------|
-| `[WARN]` | Vibe encountered an error | Read the error, fix manually |
-| `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
-| `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
+| `[WARN]` | Mimo encountered an error | Read the error, fix manually |
+| `[tool]  edit [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
+| `exit: 1` or non-zero | Mimo failed / did not complete verification | Read diff, correct prompt |
 | `Tool calls: 0` + 1000+ output tokens + timeout | Model wrote prose instead of calling tools — open-ended prompt on a large file | Switch to **closed-form OLD/NEW prompt** (Step 3). Do not relaunch the same prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not compensate — fix prompt and relaunch |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Mimo read but wrote nothing | Do not compensate — fix prompt and relaunch |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
-| Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
+| Same file read 5+ times | Mimo is looping — run likely lost | Abort, check diff, try again |
 
 **Known bugs and workarounds:**
 
 | Bug | Cause | Fix |
 |-----|-------|-----|
-| Variable declared twice | Vibe doesn't check scope | Grep the variable before relaunching |
+| Variable declared twice | Mimo doesn't check scope | Grep the variable before relaunching |
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
-| Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
-| Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
-| Windows: 10+ tool calls, all `file: Tool execution not permitted`, shell fallback attempts, 0 files changed, timeout | vibe 2.14's `default` agent gates tool approval; `-p` mode can't answer the prompt | `vibe-delegate.win` now defaults to `--agent auto-approve` on Windows. If you set the agent explicitly, pass `auto-approve` unless you specifically need `default`/`accept-edits`/`plan`. |
+| Wrote a Python helper just to replace code | Misdiagnosed edit limit | Use edit directly for ASCII code; write only if new content is too long for the prompt |
+| Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `edit` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
+| Free tier quota exhausted | Mimo's `mimo-auto` is fingerprint-throttled | Switch via `/mimo-model-pick anthropic-sonnet` (with a key) or wait for quota reset |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
@@ -324,15 +361,14 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
-- If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
-- **After finishing manually:** run `python3 /home/pcx-pi/vibe-skill/tools/log-manual.py` to log the intervention.
+- If Mimo completed ≥50% and crashed: finish the rest manually rather than relaunching.
 
 ---
 
 ## Step 7 — Report to the user
 
 ```
-✓ Vibe finished — <1-line summary>
+✓ Mimo finished — <1-line summary>
 
 Files modified:
   - path/to/file.ext (+X / -Y lines)
@@ -348,18 +384,18 @@ Ready to commit?
 ## Orchestration rules
 
 - **Decompose before delegating** — one task, one prompt.
-- **Streaming always** — never `--output text`.
+- **JSON format always** — `mimo run` runs with `--format json`; never switch to default formatted output (the parser depends on the JSON event stream).
 - **Check diff between sub-tasks** — never launch the next one blind.
-- **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
-- **Max 12 turns per call** — decompose instead of extending.
-- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
-- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only). For **closed-form OLD/NEW prompts on existing files**, `deepseek-flash` is ~13× cheaper than mistral with identical output — use it by default. **On Windows**, prefer `mistral-medium-3.5` for any task that creates new files — `deepseek-flash` is more prone to the shell-fallback loop when `write_file` returns a transient error.
+- **Don't code instead of Mimo** unless Mimo completed ≥50% and crashed.
+- **Wall-clock timeout is the only safety cap** — mimo has no `--max-turns`. Default 180s; bump to 600s for open-ended prompts on files >300 LOC. Closed-form OLD/NEW prompts typically finish in 30-60s and don't need it.
+- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `edit` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
+- **Default to mimo-auto** — free tier is fine for inline edits and small refactors. If a run repeatedly hits empty output / quick errors on the same prompt that worked previously, suspect free-tier rate-limiting and switch model via `/mimo-model-pick`.
 - **Closed-form > open-ended when the change is known** — if you can write the literal OLD/NEW blocks, use the closed-form template (Step 3) regardless of file size. Open-ended "fix this bug" prompts on files >300 LOC commonly hit 0 tool calls + timeout. Reach for closed-form first; fall back to open-ended only when the model must discover the location or design the change.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
-- **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
+- **edit [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
 - **Provide data structure context** — if a route accesses a DB payload, include the exact field paths (`payload['produit']['nom']`) in the prompt.
-- **Reuse existing assets** — for UI tasks, tell Vibe to link existing CSS/JS files. "Use `/static/style.css` and CSS class `bar-row`" is always better than "generate a dark theme".
+- **Reuse existing assets** — for UI tasks, tell Mimo to link existing CSS/JS files. "Use `/static/style.css` and CSS class `bar-row`" is always better than "generate a dark theme".
 
 ---
 
@@ -369,7 +405,7 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 Log fields and jq queries → see `SKILL-reference.md`.
 
 ```bash
-~/tools/delegate-report                  # vibe runs only (default)
+~/tools/delegate-report                  # mimo runs only (default)
 ~/tools/delegate-report --since 7        # last 7 days
 ~/tools/delegate-report --project myapp  # filter by project
 ~/tools/delegate-report --fails          # failures only
@@ -378,11 +414,13 @@ Log fields and jq queries → see `SKILL-reference.md`.
 ~/tools/delegate-report --delegate opencode  # a specific delegate
 ```
 
-Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
+Or via Claude Code: `/mimo-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
 
 ---
 
 ## See Also
 
-A sister delegate using Gemini CLI exists: [gemini-skill](https://github.com/pcx-wave/gemini-skill).
-Both write to the same `delegate-runs.jsonl` log, making runs comparable across delegates.
+This skill was ported from [vibe-skill (windows-fix)](https://github.com/KakaruHayate/vibe-skill/tree/windows-fix),
+which uses the same orchestration pattern but delegates to Mistral Vibe instead of MiMoCode.
+A sister delegate using Gemini CLI also exists: [gemini-skill](https://github.com/pcx-wave/gemini-skill).
+All three write to the same `delegate-runs.jsonl` log, so runs are comparable across delegates via `delegate-report --all`.

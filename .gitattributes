@@ -1,0 +1,4 @@
+# Preserve LF in shell + python tooling so Git Bash on Windows runs them.
+tools/* text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
