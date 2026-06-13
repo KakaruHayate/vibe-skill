@@ -157,6 +157,7 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 
 **Prompt adaptations:**
 - **Any task that defines or calls a specific function**: include the exact signature — `def validate(data: dict) -> tuple[bool, list[str]]:`.
+- **No fixed signature, but conventions matter**: point at the file to read first ("read app.py, follow its route/jsonify style") instead — don't do both, they're substitutes.
 - **Write/modify tasks**: append an output format block:
   ```
   OUTPUT FORMAT:
@@ -302,6 +303,8 @@ Ready to commit?
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
+- **UTF-8 in OLD/NEW strings → mandate python3, no exceptions** — before writing any Vibe prompt, scan every OLD and NEW string for accented chars (é è à ç ù ô î û ñ...) or emoji. If ANY are present, the prompt MUST explicitly instruct Vibe to use `python3 -c` with `pathlib.Path.read_text/write_text(encoding='utf-8')` for those changes — never `search_replace`. A `search_replace [OK]` on UTF-8 content is a silent no-op: the tool call is accepted but the string is never found. This is the #1 cause of phantom successful runs that changed nothing.
+- **Check string delimiters before delegating JS/JSON changes** — if a replacement value contains apostrophes (`'`) and the target JS property uses single-quote delimiters, the NEW string must switch to double-quotes (`"`) for that property. Scan OLD→NEW pairs for this conflict before writing the prompt; never leave it to Vibe to discover at runtime.
 - **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
 - **Provide data structure context** — if a route accesses a DB payload, include the exact field paths (`payload['produit']['nom']`) in the prompt.
@@ -332,3 +335,5 @@ Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-
 
 A sister delegate using Gemini CLI exists: [gemini-skill](https://github.com/pcx-wave/gemini-skill).
 Both write to the same `delegate-runs.jsonl` log, making runs comparable across delegates.
+
+This skill is improved regularly — run [update-skills](https://github.com/pcx-wave/update-skills) to pull the latest version of this skill, as well as all your other skills!
